@@ -1,2 +1,14 @@
 streamlit
+opencv-python-headless
+Pillow
+pytesseract
+python-docx
+sympy
+numpy
+easyocr
+transformers
+pdf2image
+latex2mathml
+matplotlib
+pandas
 openai
