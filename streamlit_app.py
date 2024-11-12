@@ -1,56 +1,206 @@
 import streamlit as st
-from openai import OpenAI
+import numpy as np
+import cv2
+from PIL import Image
+import pytesseract
+import re
+from sympy import latex, sympify
+import docx
+import io
+import tempfile
+import pyperclip
+import platform
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+# Cấu hình Streamlit
+st.set_page_config(
+    page_title="Math OCR & LaTeX Converter",
+    page_icon="📝",
+    layout="wide"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# CSS tùy chỉnh
+st.markdown("""
+<style>
+    .main { 
+        padding: 2rem; 
+    }
+    .result-box {
+        background-color: #f0f2f6;
+        border-radius: 10px;
+        padding: 20px;
+        margin: 10px 0;
+    }
+    .latex-output {
+        background-color: white;
+        padding: 15px;
+        border-radius: 5px;
+        font-family: monospace;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Hàm xử lý ảnh
+def preprocess_image(image):
+    # Chuyển về grayscale
+    gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    
+    # Tăng cường độ tương phản
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    
+    # Khử nhiễu
+    denoised = cv2.fastNlMeansDenoising(enhanced)
+    
+    # Ngưỡng hóa
+    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    return binary
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Hàm tách biểu thức toán học
+def extract_math(text):
+    math_patterns = [
+        r'y\s*=\s*\w+[^.]',  # Phương trình
+        r'\d+\s[+-/]\s\d+',  # Phép tính cơ bản
+        r'\w+\s*=\s*[^.]*',  # Biểu thức gán
+        r'\w+\s*[+\-*/]\s*\w+',  # Biểu thức đơn giản
+    ]
+    
+    math_expressions = []
+    for pattern in math_patterns:
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            math_expressions.append(match.group())
+    
+    return math_expressions
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Hàm chuyển đổi sang LaTeX
+def math_to_latex(expression):
+    try:
+        expression = expression.replace('=', ' = ')
+        latex_expr = latex(sympify(expression, evaluate=False))
+        return f"${latex_expr}$"
+    except:
+        return f"${expression}$"
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Hàm tạo tài liệu Word
+def create_word_doc(original_text, latex_code):
+    doc = docx.Document()
+    doc.add_heading('Kết quả chuyển đổi toán học', 0)
+    
+    doc.add_heading('Văn bản gốc:', level=1)
+    doc.add_paragraph(original_text)
+    
+    doc.add_heading('Mã LaTeX:', level=1)
+    doc.add_paragraph(latex_code)
+    
+    return doc
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# Hàm chụp màn hình (hỗ trợ đa nền tảng)
+def take_screenshot():
+    system = platform.system()
+    
+    if system == "Darwin":  # macOS
+        import pyscreenshot as ImageGrab
+        image = ImageGrab.grab()
+    elif system == "Windows":
+        from PIL import ImageGrab
+        image = ImageGrab.grab()
+    elif system == "Linux":
+        import pyscreenshot as ImageGrab
+        image = ImageGrab.grab()
+    else:
+        st.error("Hệ điều hành không được hỗ trợ")
+        return None
+    
+    return image
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+# Hàm chính
+def main():
+    st.title("📚 Chuyển đổi Toán học sang LaTeX")
+    
+    # Các tab chức năng
+    tab1, tab2, tab3 = st.tabs(["Tải ảnh", "Chụp màn hình", "Hướng dẫn"])
+    
+    with tab1:
+        # Upload ảnh
+        uploaded_file = st.file_uploader("Tải lên ảnh chứa nội dung toán học", 
+                                         type=['png', 'jpg', 'jpeg'])
+        
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Ảnh đã tải lên", use_column_width=True)
+            
+            if st.button("Xử lý ảnh từ tập tin"):
+                process_image(image)
+    
+    with tab2:
+        if st.button("Chụp màn hình"):
+            screenshot = take_screenshot()
+            if screenshot:
+                st.image(screenshot, caption="Ảnh chụp màn hình", use_column_width=True)
+                process_image(screenshot)
+    
+    with tab3:
+        st.markdown("""
+        ### Hướng dẫn sử dụng
+        1. Tải ảnh chứa công thức toán học
+        2. Nhấn nút "Xử lý ảnh"
+        3. Xem kết quả và tải về định dạng DOCX
+        
+        ### Lưu ý
+        - Hỗ trợ các định dạng: PNG, JPG, JPEG
+        - Chất lượng ảnh ảnh hưởng đến độ chính xác
+        """)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+# Hàm xử lý ảnh chung
+def process_image(image):
+    with st.spinner("Đang xử lý..."):
+        # Tiền xử lý ảnh
+        processed_img = preprocess_image(image)
+        
+        # OCR
+        text = pytesseract.image_to_string(processed_img, lang='vie+eng')
+        
+        # Tách biểu thức toán học
+        math_expressions = extract_math(text)
+        
+        # Chuyển đổi sang LaTeX
+        latex_results = [math_to_latex(expr) for expr in math_expressions]
+        
+        # Hiển thị kết quả
+        st.subheader("Kết quả nhận dạng")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("Văn bản gốc:")
+            st.code(text)
+        
+        with col2:
+            st.markdown("Mã LaTeX:")
+            latex_text = "\n".join(latex_results)
+            st.code(latex_text)
+            
+            # Nút copy LaTeX
+            if st.button("📋 Copy LaTeX"):
+                pyperclip.copy(latex_text)
+                st.success("Đã copy mã LaTeX!")
+        
+        # Tạo file Word
+        doc = create_word_doc(text, latex_text)
+        
+        # Lưu tạm file Word
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+            doc.save(tmp.name)
+        
+        # Nút tải xuống
+        with open(tmp.name, 'rb') as f:
+            st.download_button(
+                label="📥 Tải kết quả (DOCX)",
+                data=f.read(),
+                file_name="math_conversion.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+# Chạy ứng dụng
+if __name__ == "__main__":
+    main()
